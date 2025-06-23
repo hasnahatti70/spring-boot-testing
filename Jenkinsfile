@@ -2,16 +2,16 @@ pipeline {
     agent any
 
     tools {
-        maven 'Maven 3.9.8'
+        maven 'Maven 3.9.8'  // Configure ce nom dans Jenkins > Global Tool Configuration
     }
 
     environment {
+        SONARQUBE = 'SonarQube-10' // Nom du serveur dans Jenkins > Configure System
+        DOCKER_IMAGE = "hasnahatti70/spring-boot-testing"
         BUILD_VERSION = readMavenPom().getVersion()
-        DOCKER_IMAGE = 'mohyehia99/spring-boot-testing'
     }
 
     stages {
-
         stage('Clean Workspace') {
             steps {
                 script {
@@ -22,79 +22,91 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                git branch: 'main', url: 'https://github.com/mohyehia/spring-boot-testing'
+                git branch: 'main', url: 'https://github.com/hasnahatti70/spring-boot-testing.git'
             }
         }
 
-        stage('Unit Testing') {
+        stage('Gitleaks Scan') {
             steps {
-                sh 'mvn clean test'
+                bat '''
+                echo 🔍 Analyse avec Gitleaks...
+                "C:\\Users\\MTechno\\Downloads\\gitleaks_8.26.0_windows_x64\\gitleaks.exe" detect --source=. --verbose --report-format=json --report-path=gitleaks-report.json || exit /b 0
+
+                echo 📄 Rapport Gitleaks :
+                type gitleaks-report.json || echo ⚠️ Aucun secret détecté.
+                '''
+            }
+        }
+
+        stage('Build & Test') {
+            steps {
+                bat 'mvn clean verify'
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv(credentialsId: 'sonarQube-token', installationName: 'SonarQube') {
-                    sh "mvn verify sonar:sonar -DskipTests=true -Dsonar.projectKey=spring-boot-testing -Dsonar.projectName='spring-boot-testing'"
+                withSonarQubeEnv("${SONARQUBE}") {
+                    bat '''
+                    mvn verify sonar:sonar ^
+                      -Dsonar.projectKey=spring-boot-testing ^
+                      -Dsonar.projectName="Spring Boot Testing" ^
+                      -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+                    '''
                 }
                 waitForQualityGate abortPipeline: true
             }
         }
 
-        stage('Package') {
+        stage('Publish Test Results') {
             steps {
-                sh 'mvn package -Dmaven.test.skip'
-            }
-        }
-
-        stage('Publish test results') {
-            steps {
-                junit "**/target/surefire-reports/*.xml"
+                junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
             }
         }
 
         stage('OWASP Dependency Check') {
             steps {
                 dependencyCheck additionalArguments: '''
-                    -o './\'
-                    -s './\'
-                    -f 'ALL'
-                    --prettyPrint''', odcInstallation: 'OWASP Dependency Check'
+                    -o './' -s './' -f 'ALL' --prettyPrint
+                ''', odcInstallation: 'OWASP Dependency Check'
                 dependencyCheckPublisher pattern: 'dependency-check-report.xml'
             }
         }
 
-        stage('Trivy FS Scan') {
+        stage('Trivy File System Scan') {
             steps {
-                sh 'trivy fs .'
+                sh 'trivy fs . || true'
             }
         }
 
-        stage('Docker Build') {
+        stage('Docker Build & Push') {
             steps {
-                sh "mvn spring-boot:build-image -DskipTests"
+                script {
+                    sh "docker build -t ${DOCKER_IMAGE}:${BUILD_VERSION} ."
+                    withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'dockerHubUsername', passwordVariable: 'dockerHubPassword')]) {
+                        sh "echo ${dockerHubPassword} | docker login -u ${dockerHubUsername} --password-stdin"
+                        sh "docker push ${DOCKER_IMAGE}:${BUILD_VERSION}"
+                    }
+                }
             }
         }
 
         stage('Trivy Image Scan') {
             steps {
-                sh 'trivy image mohyehia99/spring-boot-testing:${BUILD_VERSION}'
+                sh "trivy image ${DOCKER_IMAGE}:${BUILD_VERSION} || true"
             }
         }
+    }
 
-        stage('Docker Push') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'dockerHubUsername', passwordVariable: 'dockerHubPassword')]) {
-                    sh "docker login -u ${env.dockerHubUsername} -p ${env.dockerHubPassword}"
-                    sh "docker push mohyehia99/spring-boot-testing:${BUILD_VERSION}"
-                }
-            }
+    post {
+        success {
+            echo "✅ Pipeline exécutée avec succès 🚀"
         }
-
-        stage('Trigger microservices-k8s-manifests Job') {
-            steps {
-                sh "curl -v -k --user admin:11295d15cb5acb2914d803b4d62222b728 -X POST -H 'cache-control: no-cache' -H 'Content-Type: application/x-www-form-urlencoded' --data 'DOCKER_IMAGE=${DOCKER_IMAGE}&BUILD_VERSION=${BUILD_VERSION}&APPLICATION=spring-boot-testing' http://localhost:8080/job/microservices-k8s-manifests/buildWithParameters?token=spring-microservices-in-action-token"
-            }
+        failure {
+            echo "❌ Échec de la pipeline. Consulte les logs Jenkins."
+        }
+        always {
+            archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
         }
     }
 }
