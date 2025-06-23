@@ -1,10 +1,6 @@
 pipeline {
     agent any
 
-    tools {
-        maven 'Maven'  // Configure ce nom dans Jenkins > Global Tool Configuration
-    }
-
     environment {
         SONARQUBE = 'SonarQube-10' // Nom du serveur dans Jenkins > Configure System
         DOCKER_IMAGE = "hasnahatti70/spring-boot-testing"
